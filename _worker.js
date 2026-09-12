@@ -5,9 +5,10 @@ import { connect } from "cloudflare:sockets";
 // ============================================
 var userID = "";                    // VLESS: UUID (optional if only TROJAN)
 var trojanPass = "";              // TROJAN: password (optional if only VLESS)
-var proxyIP = "cdn.xn--b6gac.eu.org";
+var proxyIP = "cdn-b100.xn--b6gac.eu.org";
 var githubProxyURL = "https://galaxytunnel.github.io/PROXYIP.txt";
-var dohURL = "https://cloudflare-dns.com/dns-query";
+var dohURL = "https://e538jrjizj.cloudflare-gateway.com/dns-query";
+var proxyPort = 80;
 
 function isValidUUID(uuid) {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -126,14 +127,16 @@ async function getDynamicProxyIP(defaultProxy, rawUrl) {
 // ============================================
 var worker_default = {
     async fetch(request, env, ctx) {
-        userID = env.UUID || env.uuid || userID;
-        trojanPass = env.TROJAN_PASS || env.trojan_pass || trojanPass;
-        proxyIP = env.PROXYIP || env.proxyip || env.PROXY_IP || proxyIP;
-        githubProxyURL = env.PROXY_LIST_URL || githubProxyURL;
-        dohURL = env.DNS_RESOLVER_URL || dohURL;
-
-        const hasVless = isValidUUID(userID);
-        const hasTrojan = !!trojanPass;
+        const config = {
+            userID: env.UUID || env.uuid || userID,
+            trojanPass: env.TROJAN_PASS || env.trojan_pass || trojanPass,
+            proxyIP: env.PROXYIP || env.proxyip || env.PROXY_IP || proxyIP,
+            proxyListURL: env.PROXY_LIST_URL || githubProxyURL,
+            dohURL: env.DNS_RESOLVER_URL || dohURL,
+            proxyPort: Number(env.PROXY_PORT || proxyPort) || 80
+        };
+        const hasVless = isValidUUID(config.userID);
+        const hasTrojan = !!config.trojanPass;
 
         if (!hasVless && !hasTrojan) {
             return new Response(
@@ -156,7 +159,7 @@ h1{color:#f87171;} code{background:#334155;padding:2px 8px;border-radius:4px;}</
 
         const upgradeHeader = request.headers.get("Upgrade");
         if (upgradeHeader === "websocket") {
-            return await proxyOverWSHandler(request);
+            return await proxyOverWSHandler(request, config);
         }
         return new Response(getGalaxyPage(), {
             status: 200,
@@ -168,7 +171,7 @@ h1{color:#f87171;} code{background:#334155;padding:2px 8px;border-radius:4px;}</
 // ============================================
 // WebSocket Handler — Dual Protocol
 // ============================================
-async function proxyOverWSHandler(request) {
+async function proxyOverWSHandler(request, config) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
     webSocket.accept();
@@ -200,9 +203,9 @@ async function proxyOverWSHandler(request) {
             let protocolType = "unknown";
 
             // Try VLESS first (version byte == 0x00)
-            if (firstByte === 0x00 && isValidUUID(userID)) {
+            if (firstByte === 0x00 && isValidUUID(config.userID)) {
                 try {
-                    result = processVlessHeader(chunk, userID);
+                    result = processVlessHeader(chunk, config.userID);
                     if (!result.hasError) protocolType = "vless";
                 } catch (e) {
                     result = { hasError: true, message: e.message };
@@ -210,8 +213,8 @@ async function proxyOverWSHandler(request) {
             }
 
             // Fallback to TROJAN
-            if ((!result || result.hasError) && trojanPass) {
-                result = processTrojanHeader(chunk, trojanPass);
+            if ((!result || result.hasError) && config.trojanPass) {
+                result = processTrojanHeader(chunk, config.trojanPass);
                 if (result && !result.hasError) protocolType = "trojan";
             }
 
@@ -230,6 +233,9 @@ async function proxyOverWSHandler(request) {
             address = addressRemote;
             portWithRandomLog = `${portRemote} ${isUDP ? "udp" : "tcp"} [${protocolType}]`;
 
+            if (!Number.isInteger(portRemote) || portRemote < 1 || portRemote > 65535) {
+                throw new Error("Invalid destination port");
+            }
             if (isUDP && portRemote !== 53) {
                 throw new Error("UDP proxy only enabled for DNS (port 53)");
             }
@@ -238,13 +244,13 @@ async function proxyOverWSHandler(request) {
             const rawClientData = chunk.slice(rawDataIndex);
 
             if (isDns) {
-                const { write } = await handleUDPOutBound(webSocket, responseHeader, log);
+                const { write } = await handleUDPOutBound(webSocket, responseHeader, log, config);
                 udpStreamWrite = write;
                 udpStreamWrite(rawClientData);
                 return;
             }
 
-            handleTCPOutBound(remoteSocketWrapper, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log);
+            handleTCPOutBound(remoteSocketWrapper, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log, config);
         },
         close() { log("WebSocket stream closed"); },
         abort(reason) { log("WebSocket stream aborted", JSON.stringify(reason)); }
@@ -258,7 +264,7 @@ async function proxyOverWSHandler(request) {
 // ============================================
 // TCP Outbound
 // ============================================
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log) {
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, responseHeader, log, config) {
     async function connectAndWrite(address, port) {
         const tcpSocket = connect({ hostname: address, port });
         remoteSocket.value = tcpSocket;
@@ -270,16 +276,17 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
     }
 
     async function retry() {
-        const activeProxy = await getDynamicProxyIP(proxyIP, githubProxyURL);
+        const activeProxy = await getDynamicProxyIP(config.proxyIP, config.proxyListURL);
         const target = activeProxy || addressRemote;
-        log(`Retrying connection via ProxyIP: ${target}`);
-        const tcpSocket = await connectAndWrite(target, portRemote);
+        const targetPort = activeProxy ? config.proxyPort : portRemote;
+        log(`Retrying connection via ProxyIP: ${target}:${targetPort}`);
+        const tcpSocket = await connectAndWrite(target, targetPort);
         tcpSocket.closed.catch((error) => {
             console.log("Retry tcpSocket closed error", error);
         }).finally(() => {
             safeCloseWebSocket(webSocket);
         });
-        remoteSocketToWS(tcpSocket, webSocket, null, log);
+        remoteSocketToWS(tcpSocket, webSocket, null, null, log);
     }
 
     const tcpSocket = await connectAndWrite(addressRemote, portRemote);
@@ -324,6 +331,7 @@ function processVlessHeader(vlessBuffer, userID2) {
         return { hasError: true, message: "Invalid VLESS data" };
     }
     const version = new Uint8Array(vlessBuffer.slice(0, 1));
+    if (version[0] !== 0x00) return { hasError: true, message: "Unsupported VLESS version" };
     const slicedBuffer = new Uint8Array(vlessBuffer.slice(1, 17));
     const slicedBufferString = stringify(slicedBuffer);
     const uuids = userID2.includes(",") ? userID2.split(",") : [userID2];
@@ -334,6 +342,7 @@ function processVlessHeader(vlessBuffer, userID2) {
     }
 
     const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
+    if (vlessBuffer.byteLength < 19 + optLength + 3) return { hasError: true, message: "Truncated VLESS header" };
     const command = new Uint8Array(vlessBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
 
     let isUDP = false;
@@ -547,24 +556,31 @@ function safeCloseWebSocket(socket) {
 // ============================================
 // UDP / DoH Handler
 // ============================================
-async function handleUDPOutBound(webSocket, responseHeader, log) {
+async function handleUDPOutBound(webSocket, responseHeader, log, config) {
     let isHeaderSent = false;
     const transformStream = new TransformStream({
+        buffer: new Uint8Array(0),
         transform(chunk, controller) {
-            for (let index = 0; index < chunk.byteLength; ) {
-                const lengthBuffer = chunk.slice(index, index + 2);
-                const udpPacketLength = new DataView(lengthBuffer).getUint16(0);
-                const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPacketLength));
-                index = index + 2 + udpPacketLength;
-                controller.enqueue(udpData);
+            const incoming = new Uint8Array(chunk);
+            const combined = new Uint8Array(this.buffer.length + incoming.length);
+            combined.set(this.buffer); combined.set(incoming, this.buffer.length);
+            let index = 0;
+            while (combined.length - index >= 2) {
+                const udpPacketLength = new DataView(combined.buffer, combined.byteOffset + index, 2).getUint16(0);
+                if (combined.length - index < udpPacketLength + 2) break;
+                controller.enqueue(combined.slice(index + 2, index + 2 + udpPacketLength));
+                index += udpPacketLength + 2;
             }
+            this.buffer = combined.slice(index);
         },
-        flush(controller) {}
+        flush(controller) {
+            if (this.buffer.length !== 0) throw new Error("Incomplete UDP packet");
+        }
     });
 
     transformStream.readable.pipeTo(new WritableStream({
         async write(chunk) {
-            const resp = await fetch(dohURL, {
+            const resp = await fetch(config.dohURL, {
                 method: "POST",
                 headers: { "content-type": "application/dns-message" },
                 body: chunk
