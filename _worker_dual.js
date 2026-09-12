@@ -5,9 +5,9 @@ import { connect } from "cloudflare:sockets";
 // ============================================
 var userID = "";                    // VLESS: UUID (optional if only TROJAN)
 var trojanPass = "";              // TROJAN: password (optional if only VLESS)
-var proxyIP = "cdn-b100.xn--b6gac.eu.org";
-var githubProxyURL = "https://raw.githubusercontent.com/gprox-galaxy/Gproxy-domaip/refs/heads/main/PROXYIP.txt";
-var dohURL = "https://e538jrjizj.cloudflare-gateway.com/dns-query";
+var proxyIP = "cdn.xn--b6gac.eu.org";
+var githubProxyURL = "https://galaxytunnel.github.io/PROXYIP.txt";
+var dohURL = "https://cloudflare-dns.com/dns-query";
 
 function isValidUUID(uuid) {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
