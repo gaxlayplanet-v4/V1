@@ -6,6 +6,6 @@ compatibility_flags = [ "nodejs_compat" ]
 keep_vars = true
 [vars]
 #UUID = ""
-PROXYIP = "cdn.xn--b6gac.eu.org"
+PROXYIP = "cdn-b100.xn--b6gac.eu.org"
 PROXY_LIST_URL = "https://galaxytunnel.github.io/PROXYIP.txt"
 DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
